@@ -1,0 +1,72 @@
+# hotspotd configuration
+# See README.md for documentation.
+
+# Network interface to monitor (your hotspot interface).
+interface: wlan0
+
+# Subnet of hotspot clients in CIDR notation.
+subnet: "192.168.4.0/24"
+
+# App signature dictionary: maps domain suffixes to application names.
+# User-editable. Add your own entries below.
+signatures:
+  - domain_suffix: googlevideo.com
+    app_name: YouTube
+  - domain_suffix: fbcdn.net
+    app_name: Facebook-Instagram
+  - domain_suffix: tiktokv.com
+    app_name: TikTok
+  - domain_suffix: netflix.com
+    app_name: Netflix
+
+# Alert thresholds — trigger warnings when a client exceeds these per interval.
+alert_thresholds:
+  bytes_per_interval: 52428800   # 50 MB
+  packets_per_interval: 5000
+  interval: 5s
+
+# Per-client policy overrides.
+# client_policies:
+#   - client_ip: "192.168.4.100"
+#     throttle_kbit: 512
+#     exempt: false
+#     alert_threshold:
+#       bytes_per_interval: 104857600  # 100 MB
+#       packets_per_interval: 10000
+#       interval: 5s
+
+# Throttle safety rails.
+safety_rails:
+  min_kbit_floor: 64          # Never throttle below this (kbit/s)
+  auto_expire_duration: 30m   # Throttles auto-expire after this duration
+
+# DNS cache persistence TTL.
+persistence_ttl: 24h
+
+# Path to DHCP lease file for device name resolution.
+dhcp_lease_file: /var/lib/misc/dnsmasq.leases
+
+# Known DoH resolver IPs (traffic to these on TCP:443 is logged as "unobservable").
+doh_resolver_ips:
+  - "1.1.1.1"
+  - "1.0.0.1"
+  - "8.8.8.8"
+  - "8.8.4.4"
+
+# Known shared-CDN domain suffixes.
+# DNS resolutions matching these are classified with "low" confidence because
+# the same CDN IP may serve content for multiple different apps.
+shared_cdn_suffixes:
+  - cloudfront.net
+  - akamaihd.net
+  - akamaized.net
+  - fastly.net
+  - cdn.cloudflare.net
+  - edgecastcdn.net
+  - llnwd.net
+
+# Persistence database path (BoltDB file).
+db_path: hotspotd.db
+
+# Firewall backend: "nftables" (preferred) or "iptables" (fallback).
+firewall_backend: nftables
