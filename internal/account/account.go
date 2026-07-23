@@ -50,6 +50,10 @@ type Accountant struct {
 	chainName string
 	// tableName for nftables.
 	tableName string
+
+	// chainReady is false if the firewall chain setup failed (e.g. on macOS).
+	// When false, we skip all rule insertion/polling silently.
+	chainReady bool
 }
 
 // NewAccountant creates a new traffic accountant.
@@ -71,8 +75,10 @@ func NewAccountant(classifier *classify.Classifier, iface, subnet string, interv
 func (a *Accountant) Start(ctx context.Context) error {
 	// Set up the accounting chain.
 	if err := a.setupChain(); err != nil {
-		log.Printf("[WARN] Failed to set up accounting chain (may need root): %v", err)
-		// Continue anyway — we'll still track counters in-memory.
+		log.Printf("[WARN] Accounting disabled — firewall tools not available (expected on macOS): %v", err)
+		a.chainReady = false
+	} else {
+		a.chainReady = true
 	}
 
 	ticker := time.NewTicker(a.interval)
@@ -81,11 +87,15 @@ func (a *Accountant) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			a.cleanup()
+			if a.chainReady {
+				a.cleanup()
+			}
 			return nil
 		case <-ticker.C:
-			a.syncRules()
-			a.pollCounters()
+			if a.chainReady {
+				a.syncRules()
+				a.pollCounters()
+			}
 		}
 	}
 }

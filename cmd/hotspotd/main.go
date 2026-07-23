@@ -19,6 +19,7 @@ import (
 	"hotspotd/internal/enforce"
 	"hotspotd/internal/identity"
 	"hotspotd/internal/sniffer"
+	"hotspotd/internal/usage"
 )
 
 func main() {
@@ -105,8 +106,11 @@ func main() {
 		cfg.AlertThresholds.Interval, cfg.FirewallBackend,
 	)
 
+	// -- Usage tracker --
+	tracker := usage.NewTracker(cfg.Interface)
+
 	// -- Alert (Module 4): Threshold monitoring --
-	monitor := alert.NewMonitor(accountant, classifier, resolver, sniff, cfg)
+	monitor := alert.NewMonitor(accountant, classifier, resolver, sniff, cfg, tracker)
 
 	// -- Launch all modules in goroutines --
 	var wg sync.WaitGroup

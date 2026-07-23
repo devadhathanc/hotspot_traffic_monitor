@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,6 +45,9 @@ type Classifier struct {
 
 	// ttl for cache entries.
 	ttl time.Duration
+
+	// gen increments on every new or changed classification.
+	gen atomic.Int64
 }
 
 // NewClassifier creates a classifier with the given signature dictionary and CDN set.
@@ -120,8 +124,14 @@ func (c *Classifier) Update(ip string, domain string) {
 	}
 
 	c.mu.Lock()
+	existing, existed := c.resolved[ip]
+	changed := !existed || existing.App != app
 	c.resolved[ip] = info
 	c.mu.Unlock()
+
+	if changed {
+		c.gen.Add(1)
+	}
 
 	// Write-through to persistence.
 	if c.persist != nil {
@@ -178,6 +188,11 @@ func (c *Classifier) Snapshot() map[string]AppInfo {
 		}
 	}
 	return snap
+}
+
+// Generation returns a counter that increments on every new classification.
+func (c *Classifier) Generation() int64 {
+	return c.gen.Load()
 }
 
 // Flush persists the entire in-memory map to disk. Called on graceful shutdown.

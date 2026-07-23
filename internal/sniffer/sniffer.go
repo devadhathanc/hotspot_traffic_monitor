@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -30,9 +32,18 @@ type dnsEvent struct {
 
 // Stats holds sniffer counters for visibility reporting.
 type Stats struct {
-	DNSQueriesSeen  int64
+	DNSQueriesSeen   int64
 	DNSResponsesSeen int64
-	DoHEventsSeen   int64
+	DoHEventsSeen    int64
+}
+
+// DomainRecord tracks a DNS domain seen on the network.
+type DomainRecord struct {
+	Domain   string
+	IPs      []string
+	App      string // classified app name, or empty
+	LastSeen time.Time
+	QueryCnt int
 }
 
 // Sniffer captures DNS traffic and feeds it into the classifier.
@@ -48,6 +59,11 @@ type Sniffer struct {
 	dnsQueries   atomic.Int64
 	dnsResponses atomic.Int64
 	dohEvents    atomic.Int64
+
+	// All domains seen, keyed by domain name.
+	domainMu  sync.Mutex
+	domains   map[string]*DomainRecord
+	domainGen atomic.Int64
 }
 
 // New creates a new Sniffer bound to the given interface.
@@ -57,16 +73,52 @@ func New(iface, subnet string, classifier *classify.Classifier, dohResolverSet m
 		subnet:         subnet,
 		classifier:     classifier,
 		dohResolverSet: dohResolverSet,
+		domains:        make(map[string]*DomainRecord),
 	}
 }
 
 // GetStats returns a snapshot of sniffer counters.
 func (s *Sniffer) GetStats() Stats {
 	return Stats{
-		DNSQueriesSeen:  s.dnsQueries.Load(),
+		DNSQueriesSeen:   s.dnsQueries.Load(),
 		DNSResponsesSeen: s.dnsResponses.Load(),
-		DoHEventsSeen:   s.dohEvents.Load(),
+		DoHEventsSeen:    s.dohEvents.Load(),
 	}
+}
+
+// trackDomain records a DNS response for domain tracking.
+func (s *Sniffer) trackDomain(domain string, ips []string, app string) {
+	s.domainMu.Lock()
+	defer s.domainMu.Unlock()
+
+	rec, exists := s.domains[domain]
+	if !exists {
+		rec = &DomainRecord{Domain: domain}
+		s.domains[domain] = rec
+		s.domainGen.Add(1)
+	}
+	rec.IPs = ips
+	rec.LastSeen = time.Now()
+	rec.QueryCnt++
+	if app != "" {
+		rec.App = app
+	}
+}
+
+// GetDomains returns a snapshot of all tracked domains.
+func (s *Sniffer) GetDomains() []DomainRecord {
+	s.domainMu.Lock()
+	defer s.domainMu.Unlock()
+	out := make([]DomainRecord, 0, len(s.domains))
+	for _, rec := range s.domains {
+		out = append(out, *rec)
+	}
+	return out
+}
+
+// DomainGeneration returns a counter that increments when new domains are seen.
+func (s *Sniffer) DomainGeneration() int64 {
+	return s.domainGen.Load()
 }
 
 // Start begins capturing DNS traffic. It blocks until ctx is cancelled.
@@ -133,13 +185,18 @@ func (s *Sniffer) Start(ctx context.Context) error {
 			}
 			if evt.IsResponse {
 				s.dnsResponses.Add(1)
+				var classifiedApp string
 				for _, ip := range evt.ResolvedIPs {
 					s.classifier.Update(ip, evt.Domain)
+					if classifiedApp == "" {
+						if app, _, ok := s.classifier.Lookup(ip); ok {
+							classifiedApp = app
+						}
+					}
 				}
+				s.trackDomain(evt.Domain, evt.ResolvedIPs, classifiedApp)
 			} else {
 				s.dnsQueries.Add(1)
-				// Queries are logged but not directly used for classification.
-				// They're useful for debugging and future features.
 			}
 		}
 	}

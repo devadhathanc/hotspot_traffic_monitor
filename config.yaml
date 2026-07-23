@@ -5,19 +5,69 @@
 interface: wlan0
 
 # Subnet of hotspot clients in CIDR notation.
-subnet: "192.168.4.0/24"
+subnet: "192.168.2.0/24"
 
 # App signature dictionary: maps domain suffixes to application names.
 # User-editable. Add your own entries below.
 signatures:
   - domain_suffix: googlevideo.com
     app_name: YouTube
+  - domain_suffix: youtube.com
+    app_name: YouTube
+  - domain_suffix: ytimg.com
+    app_name: YouTube
+  - domain_suffix: ggpht.com
+    app_name: YouTube
   - domain_suffix: fbcdn.net
+    app_name: Facebook-Instagram
+  - domain_suffix: instagram.com
+    app_name: Facebook-Instagram
+  - domain_suffix: facebook.com
     app_name: Facebook-Instagram
   - domain_suffix: tiktokv.com
     app_name: TikTok
+  - domain_suffix: tiktokcdn.com
+    app_name: TikTok
+  - domain_suffix: tiktok.com
+    app_name: TikTok
   - domain_suffix: netflix.com
     app_name: Netflix
+  - domain_suffix: nflxvideo.net
+    app_name: Netflix
+  - domain_suffix: github.com
+    app_name: GitHub
+  - domain_suffix: githubusercontent.com
+    app_name: GitHub
+  - domain_suffix: githubassets.com
+    app_name: GitHub
+  - domain_suffix: linkedin.com
+    app_name: LinkedIn
+  - domain_suffix: licdn.com
+    app_name: LinkedIn
+  - domain_suffix: whatsapp.com
+    app_name: WhatsApp
+  - domain_suffix: whatsapp.net
+    app_name: WhatsApp
+  - domain_suffix: spotify.com
+    app_name: Spotify
+  - domain_suffix: scdn.co
+    app_name: Spotify
+  - domain_suffix: twitter.com
+    app_name: Twitter-X
+  - domain_suffix: twimg.com
+    app_name: Twitter-X
+  - domain_suffix: x.com
+    app_name: Twitter-X
+  - domain_suffix: snapchat.com
+    app_name: Snapchat
+  - domain_suffix: snap.com
+    app_name: Snapchat
+  - domain_suffix: reddit.com
+    app_name: Reddit
+  - domain_suffix: redd.it
+    app_name: Reddit
+  - domain_suffix: redditmedia.com
+    app_name: Reddit
 
 # Alert thresholds — trigger warnings when a client exceeds these per interval.
 alert_thresholds:

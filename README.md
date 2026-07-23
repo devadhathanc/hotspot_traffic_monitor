@@ -1,6 +1,38 @@
 # hotspotd — Wi-Fi Hotspot Traffic Monitor & Rate Limiter
 
-A host-side daemon that monitors guest devices connected to your Wi-Fi hotspot, classifies their traffic by application via DNS snooping, and rate-limits heavy consumers using Linux traffic control (`tc`) and firewall rules.
+A host-side daemon that monitors guest devices connected to your Wi-Fi hotspot, classifies their traffic by application via DNS snooping, tracks bandwidth usage, and rate-limits heavy consumers using Linux traffic control (`tc`) and firewall rules.
+
+## Features
+
+- **Live DNS Activity Table** — grouped by app, refreshes only when new domains appear
+- **App Classification** — 29+ app signatures (YouTube, GitHub, Reddit, WhatsApp, etc.)
+- **Bandwidth Tracking** — real-time download/upload counters from interface stats
+- **Rate Limiting** — throttle heavy consumers via `tc`/`nftables` (Linux)
+- **Persistence** — DNS cache survives restarts via BoltDB
+- **Graceful Shutdown** — cleans up all firewall rules on exit
+
+### Sample Output
+
+```
++----------+---------------------------------+------------------------------------------+----------+
+| App      | Domain                          | Resolved IPs                             | LastSeen |
++----------+---------------------------------+------------------------------------------+----------+
+| GitHub   | api.github.com                  | 20.207.73.85                             | 21:31:32 |
+|          | collector.github.com            | 140.82.113.21                            | 21:31:31 |
+|          | github.com                      | 20.207.73.82                             | 21:31:30 |
++----------+---------------------------------+------------------------------------------+----------+
+| WhatsApp | scontent.whatsapp.net           | 57.144.49.32                             | 21:31:15 |
+|          | www.whatsapp.com                | 57.144.49.32                             | 21:31:14 |
++----------+---------------------------------+------------------------------------------+----------+
+| YouTube  | www.youtube.com                 | 142.251.153.4, 142.251.150.4, 142.251... | 21:31:25 |
++----------+---------------------------------+------------------------------------------+----------+
+| Others   | awakesecurity.com               | 172.67.74.98, 104.26.14.86, 104.26.15.86| 21:31:38 |
+|          | www.google.com                  | 142.251.152.119, 142.251.154.119, 142... | 21:31:23 |
++----------+---------------------------------+------------------------------------------+----------+
+| 17 dom   | Down: 336.70 KB                 | Up: 4.14 MB  |  Total: 4.47 MB           | 0m45s    |
+|          | Queries: 60                     | Responses: 30                            |          |
++----------+---------------------------------+------------------------------------------+----------+
+```
 
 ## Requirements
 
@@ -12,11 +44,10 @@ A host-side daemon that monitors guest devices connected to your Wi-Fi hotspot, 
   - `nftables` or `iptables` available
   - `tc` (iproute2) for traffic shaping
   - Go 1.22+ for building
+- **macOS**: Builds and runs for development/testing. DNS capture, classification, bandwidth tracking, and the live table all work. Rate-limit enforcement is stubbed out (no-op).
 - **Windows** (best-effort):
   - Administrative privileges
   - PowerShell with `New-NetQosPolicy` cmdlet
-  - **Note:** QoS enforcement may require Windows Server + Group Policy to actually take effect
-- **macOS**: Builds and runs for development/testing, but enforcement is stubbed out (no-op)
 
 ### Building
 
@@ -55,7 +86,6 @@ sudo ./hotspotd --reset
 **Step 2 — Find your hotspot interface and subnet**
 
 ```bash
-# A new bridge interface appears when sharing is active
 ifconfig | grep -A3 bridge100
 ```
 
@@ -69,38 +99,15 @@ Here, the interface is `bridge100` and the subnet is `192.168.2.0/24`.
 
 **Step 3 — Connect your phone/tablet** to the hotspot Wi-Fi network.
 
-**Step 4 — Update `config.yaml`** (optional — you can use `--iface` flag instead)
-
-```yaml
-interface: bridge100
-subnet: "192.168.2.0/24"
-```
-
-**Step 5 — Run hotspotd**
+**Step 4 — Run hotspotd**
 
 ```bash
 sudo ./hotspotd --iface bridge100
 ```
 
-Expected startup output:
-```
-🚀 [SYSTEM] Hotspot Background Daemon Started.
-📡 [SYSTEM] Interface: bridge100 (Subnet: 192.168.2.0/24)
-📚 [SYSTEM] Signature dictionary loaded: 4 app signatures
-```
+**Step 5 — Browse on your phone** — open YouTube, Reddit, GitHub, etc. and watch the live table update.
 
-**Step 6 — Generate traffic on your phone**
-
-| Action on phone          | Expected classification       |
-|--------------------------|-------------------------------|
-| Play a **YouTube** video | `YouTube` (high confidence)   |
-| Scroll **Instagram**     | `Facebook-Instagram` (high)   |
-| Open **TikTok**          | `TikTok` (high confidence)    |
-| Browse **Netflix**       | `Netflix` (high confidence)   |
-
-Watch the terminal for `[STATS]`, `[METRIC UPDATE]`, and `⚠️ [WARNING]` lines.
-
-**Step 7 — Stop** with `Ctrl+C` (gracefully flushes cache and cleans up).
+**Step 6 — Stop** with `Ctrl+C` (gracefully flushes cache and cleans up).
 
 ### Testing with a Real Hotspot (Linux — Full Enforcement)
 
@@ -117,25 +124,7 @@ go build -o hotspotd ./cmd/hotspotd/
 sudo ./hotspotd --iface wlan0
 ```
 
-On Linux you'll see actual firewall/tc commands logged:
-```
-🔒 [FIREWALL] Executing OS Command: nft add table ip hotspotd
-🔒 [FIREWALL] Executing OS Command: tc qdisc add dev wlan0 root handle 1: htb default 99
-```
-
-### Verifying Specific Features
-
-```bash
-# Test --reset with no prior rules (should exit cleanly)
-sudo ./hotspotd --reset
-
-# Test persistence (restart and see cached entries preloaded)
-sudo ./hotspotd --iface bridge100    # run, let DNS flow, Ctrl+C
-sudo ./hotspotd --iface bridge100    # restart — see "DNS cache preloaded: X entries"
-
-# Test aggressive mode (enforce on CDN/low-confidence matches)
-sudo ./hotspotd --iface bridge100 --aggressive
-```
+On Linux you'll see actual firewall/tc commands being applied for rate limiting.
 
 ### Troubleshooting
 
@@ -152,22 +141,23 @@ sudo ./hotspotd --iface bridge100 --aggressive
 ```
 cmd/hotspotd/main.go          — Supervisor: wires all modules, signal handling
 internal/config/               — YAML config loading + CLI flag merge
-internal/sniffer/              — DNS packet capture via gopacket/pcap (Module 1)
+internal/sniffer/              — DNS packet capture + domain tracking (Module 1)
 internal/classify/             — IP→App classification with BoltDB persistence (Module 2)
 internal/account/              — Traffic accounting via firewall counters (Module 3)
-internal/alert/                — Threshold monitoring and stats emission (Module 4)
+internal/alert/                — Live table display + threshold monitoring (Module 4)
 internal/enforce/              — Rate-limiting via tc + iptables/nftables (Module 5)
 internal/identity/             — Device name resolution via DHCP/ARP (Module 6)
+internal/usage/                — Interface bandwidth tracking via netstat
 ```
 
 ### Data Flow
 
 ```
 DNS packets (pcap) → Sniffer → Classifier → Account (firewall counters)
-                                    ↓              ↓
-                               Identity        Alert (thresholds)
-                                    ↓              ↓
-                                              Enforce (tc rate-limit)
+                        ↓            ↓              ↓
+                   Domain Tracker  Identity      Alert (live table + thresholds)
+                        ↓                            ↓
+                   Usage Tracker              Enforce (tc rate-limit)
 ```
 
 ## Configuration
@@ -185,7 +175,7 @@ See `config.yaml` for the full configuration with comments. Key settings:
 
 ### App Signature Dictionary
 
-The signature dictionary in `config.yaml` maps domain suffixes to application names. Add your own entries:
+The signature dictionary in `config.yaml` maps domain suffixes to application names (29+ apps included). Add your own:
 
 ```yaml
 signatures:
@@ -197,7 +187,6 @@ signatures:
     app_name: TikTok
   - domain_suffix: netflix.com
     app_name: Netflix
-  # Add more:
   - domain_suffix: spotify.com
     app_name: Spotify
 ```
@@ -207,30 +196,27 @@ signatures:
 > **These are inherent to DNS-based traffic classification and cannot be fully resolved without DPI (Deep Packet Inspection).**
 
 ### 1. DNS-over-HTTPS (DoH) Blind Spot
-Clients using DoH (e.g., Firefox with Cloudflare DoH, Chrome with Google DoH) bypass our DNS sniffer entirely. We **detect** DoH traffic (TCP:443 to known resolver IPs like 1.1.1.1, 8.8.8.8) and report it as "unobservable" in stats, but we cannot classify the traffic.
+Clients using DoH bypass our DNS sniffer entirely. We **detect** DoH traffic (TCP:443 to known resolver IPs) and report it in stats, but cannot classify it.
 
 ### 2. CDN IP Sharing
-Multiple apps may share the same CDN IP addresses (e.g., CloudFront, Akamai, Fastly). When a CDN IP is resolved for one app but also serves traffic for another, we may misattribute traffic. CDN-resolved IPs are classified with **low confidence** and are not enforced unless `--aggressive` mode is enabled.
+Multiple apps may share CDN IPs (CloudFront, Akamai, Fastly). CDN-resolved IPs are classified with **low confidence** and not enforced unless `--aggressive` mode is enabled.
 
 ### 3. Stale DNS Cache
-DNS resolutions are cached for 24h (configurable). If an app's CDN IP changes, we may continue classifying traffic to the old IP as belonging to that app. The cache is preloaded on startup and expired entries are purged.
+DNS resolutions are cached for 24h (configurable). If an app's CDN IP changes, we may continue classifying the old IP. The cache is purged on startup.
 
-### 4. Foreground/Background Tagging
-Without DPI or per-app socket tracking, we cannot distinguish foreground vs. background app traffic. All classified traffic is tagged as "foreground" in metric reports.
-
-### 5. IPv6 Partial Support
-IPv6 DNS responses (AAAA records) are captured and classified, but firewall rules for accounting and enforcement are IPv4-only (`ip` table in nftables, `iptables` not `ip6tables`).
+### 4. Bandwidth Tracking Granularity
+Interface-level bandwidth is tracked via `netstat` counters (total download/upload on the hotspot interface). Per-app bandwidth breakdowns require Linux nftables accounting rules.
 
 ## Persistence
 
-DNS classification data is persisted in a BoltDB database (`hotspotd.db` by default). On startup, the cache is preloaded from disk with expired entries purged. On graceful shutdown (SIGINT/SIGTERM), the cache is flushed to disk.
+DNS classification data is persisted in BoltDB (`hotspotd.db`). On startup, the cache is preloaded. On shutdown (SIGINT/SIGTERM), the cache is flushed to disk.
 
 ## Safety Rails
 
-- **Minimum throttle floor**: Rate-limits never go below 64 kbit/s (configurable). This prevents accidentally cutting off a device entirely.
-- **Auto-expire**: All throttle rules automatically expire after 30 minutes (configurable). On expiry, traffic is re-evaluated — re-throttled only if still over threshold.
-- **Low-confidence protection**: By default, rate-limiting is only applied to high-confidence classifications. Use `--aggressive` to override.
-- **Graceful shutdown**: On SIGINT/SIGTERM, all applied rules are removed before exit. Use `--reset` to manually clear all rules.
+- **Minimum throttle floor**: Never go below 64 kbit/s (configurable)
+- **Auto-expire**: Throttles expire after 30 minutes (configurable)
+- **Low-confidence protection**: Rate-limiting only on high-confidence classifications by default
+- **Graceful shutdown**: All rules removed on exit. Use `--reset` to manually clear.
 
 ## License
 
