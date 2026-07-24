@@ -12,6 +12,10 @@
 *.swo
 *~
 
+# Maven
+target/
+*.jar
+
 # OS
 .DS_Store
 Thumbs.db

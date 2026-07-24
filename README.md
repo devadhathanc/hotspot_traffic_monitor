@@ -1,15 +1,15 @@
 # hotspotd — Wi-Fi Hotspot Traffic Monitor & Rate Limiter
 
-A host-side daemon that monitors guest devices connected to your Wi-Fi hotspot, classifies their traffic by application via DNS snooping, tracks bandwidth usage, and rate-limits heavy consumers using Linux traffic control (`tc`) and firewall rules.
+A host-side daemon written in Java that monitors guest devices connected to your Wi-Fi hotspot, classifies their traffic by application via DNS snooping, tracks bandwidth usage, and rate-limits heavy consumers using Linux traffic control (`tc`) and firewall rules (`nftables`/`iptables`).
 
 ## Features
 
 - **Live DNS Activity Table** — grouped by app, refreshes only when new domains appear
 - **App Classification** — 29+ app signatures (YouTube, GitHub, Reddit, WhatsApp, etc.)
 - **Bandwidth Tracking** — real-time download/upload counters from interface stats
-- **Rate Limiting** — throttle heavy consumers via `tc`/`nftables` (Linux)
-- **Persistence** — DNS cache survives restarts via BoltDB
-- **Graceful Shutdown** — cleans up all firewall rules on exit
+- **Rate Limiting** — throttle heavy consumers via `tc`/`nftables` (Linux) or NetQoS (Windows)
+- **Persistence** — DNS cache survives restarts via SQLite embedded database
+- **Graceful Shutdown** — JVM shutdown hook cleans up all firewall rules on exit
 
 ### Sample Output
 
@@ -34,190 +34,142 @@ A host-side daemon that monitors guest devices connected to your Wi-Fi hotspot, 
 +----------+---------------------------------+------------------------------------------+----------+
 ```
 
+---
+
 ## Requirements
 
 ### System Requirements
 
-- **Linux** (primary target) with:
-  - Root/sudo privileges (required for packet capture, firewall rules, and traffic control)
-  - `libpcap-dev` installed (`apt install libpcap-dev` on Debian/Ubuntu)
-  - `nftables` or `iptables` available
-  - `tc` (iproute2) for traffic shaping
-  - Go 1.22+ for building
-- **macOS**: Builds and runs for development/testing. DNS capture, classification, bandwidth tracking, and the live table all work. Rate-limit enforcement is stubbed out (no-op).
-- **Windows** (best-effort):
-  - Administrative privileges
-  - PowerShell with `New-NetQosPolicy` cmdlet
+- **Java 22+**
+- **Maven 3.8+**
+- **macOS / Linux / Windows**
+  - Root/sudo privileges (required for pcap raw socket capture and firewall rules)
+  - `libpcap` installed (`apt install libpcap-dev` on Debian/Ubuntu, native on macOS)
 
 ### Building
 
 ```bash
-go build -o hotspotd ./cmd/hotspotd/
+mvn clean package
 ```
+
+This generates an executable fat JAR in `target/hotspotd-1.0-SNAPSHOT-jar-with-dependencies.jar`.
 
 ### Running
 
 ```bash
-# Run with default config (looks for config.yaml in current directory)
-sudo ./hotspotd
+# Run with default config
+sudo java -jar target/hotspotd-1.0-SNAPSHOT-jar-with-dependencies.jar
 
 # Specify interface and config
-sudo ./hotspotd --iface wlan0 --config /etc/hotspotd/config.yaml
+sudo java -jar target/hotspotd-1.0-SNAPSHOT-jar-with-dependencies.jar --iface wlan0 --config config.yaml
 
 # Aggressive mode (enforce on low-confidence classifications)
-sudo ./hotspotd --aggressive
+sudo java -jar target/hotspotd-1.0-SNAPSHOT-jar-with-dependencies.jar --aggressive
 
 # Reset mode: remove all applied rules and exit
-sudo ./hotspotd --reset
+sudo java -jar target/hotspotd-1.0-SNAPSHOT-jar-with-dependencies.jar --reset
 ```
 
-### Testing with a Real Hotspot (macOS)
+---
 
-> **Note:** On macOS, DNS capture/classification/alerting work fully. Rate-limit enforcement is stubbed out (requires Linux).
-
-**Step 1 — Create a Wi-Fi Hotspot**
-
-1. Open **System Settings → General → Sharing → Internet Sharing**
-2. "Share your connection from": select your internet source (e.g. **Wi-Fi** or **Ethernet**)
-3. "To devices using": check **Wi-Fi**
-4. Click **Wi-Fi Options** → set a network name and password
-5. Toggle Internet Sharing **ON**
-
-**Step 2 — Find your hotspot interface and subnet**
-
-```bash
-ifconfig | grep -A3 bridge100
-```
-
-You'll see output like:
-```
-bridge100: flags=8863<UP,BROADCAST,SMART,RUNNING,...> mtu 1500
-    inet 192.168.2.1 netmask 0xffffff00 broadcast 192.168.2.255
-```
-
-Here, the interface is `bridge100` and the subnet is `192.168.2.0/24`.
-
-**Step 3 — Connect your phone/tablet** to the hotspot Wi-Fi network.
-
-**Step 4 — Run hotspotd**
-
-```bash
-sudo ./hotspotd --iface bridge100
-```
-
-**Step 5 — Browse on your phone** — open YouTube, Reddit, GitHub, etc. and watch the live table update.
-
-**Step 6 — Stop** with `Ctrl+C` (gracefully flushes cache and cleans up).
-
-### Testing with a Real Hotspot (Linux — Full Enforcement)
-
-On Linux (e.g. Raspberry Pi running `hostapd` + `dnsmasq`):
-
-```bash
-# Install dependencies
-sudo apt install libpcap-dev nftables iproute2
-
-# Build
-go build -o hotspotd ./cmd/hotspotd/
-
-# Run (wlan0 = your hotspot interface)
-sudo ./hotspotd --iface wlan0
-```
-
-On Linux you'll see actual firewall/tc commands being applied for rate limiting.
-
-### Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `failed to open pcap`: no such device | Check interface name: `ifconfig \| grep bridge` |
-| `Operation not permitted` | Must run with `sudo` |
-| No DNS traffic captured | Phone may be using DNS-over-HTTPS. Check phone DNS settings |
-| No classifications appearing | Verify phone is on hotspot (not cellular). Open YouTube to trigger |
-| Build fails: `pcap.h not found` | Install Xcode CLI tools: `xcode-select --install` |
-
-## Architecture
+## Software Architecture
 
 ```
-cmd/hotspotd/main.go          — Supervisor: wires all modules, signal handling
-internal/config/               — YAML config loading + CLI flag merge
-internal/sniffer/              — DNS packet capture + domain tracking (Module 1)
-internal/classify/             — IP→App classification with BoltDB persistence (Module 2)
-internal/account/              — Traffic accounting via firewall counters (Module 3)
-internal/alert/                — Live table display + threshold monitoring (Module 4)
-internal/enforce/              — Rate-limiting via tc + iptables/nftables (Module 5)
-internal/identity/             — Device name resolution via DHCP/ARP (Module 6)
-internal/usage/                — Interface bandwidth tracking via netstat
+com.hotspotd
+├── App.java                            — Supervisor / Entry point (DI wiring)
+├── config/
+│   ├── Config.java                     — Configuration model (cached derived collections)
+│   ├── ConfigLoader.java               — YAML loader & CLI flag merger
+│   ├── AppSignature.java               — Domain-to-App mapping model
+│   ├── AlertThreshold.java             — Threshold configuration
+│   ├── ClientPolicy.java               — Per-client policy overrides
+│   └── ThrottleSafetyRails.java        — Safety rail parameters
+├── sniffer/
+│   ├── Sniffer.java                    — Packet sniffer interface (DIP)
+│   ├── DnsSniffer.java                 — Pcap4j capture loop & raw packet parser
+│   ├── DnsEvent.java                   — Immutable DNS Query/Response event model
+│   ├── DnsListener.java                — Observer interface for DNS events
+│   ├── DomainRecord.java               — Thread-safe network domain tracking entity
+│   └── SnifferStats.java               — Packet capture counters
+├── classify/
+│   ├── Classifier.java                 — ISP classification interface
+│   ├── IPClassifier.java               — Thread-safe IP→App classifier using DomainTrie
+│   ├── DomainTrie.java                 — Reverse-domain Trie for O(L) suffix matching
+│   ├── Confidence.java                 — Classification confidence enum (HIGH/LOW)
+│   ├── AppInfo.java                    — Immutable classification result model
+│   ├── DnsCacheRepository.java         — Repository pattern interface
+│   └── SqliteDnsCacheRepository.java   — SQLite JDBC persistence with PreparedStatement caching
+├── account/
+│   ├── TrafficAccountant.java          — Traffic accounting interface
+│   ├── PlatformAccountantFactory.java  — Factory for OS-specific accountants (OCP)
+│   ├── LinuxFirewallAccountant.java    — nftables/iptables counter parser
+│   ├── StubAccountant.java             — macOS stub accountant
+│   ├── BucketKey.java                  — Client+App counter key
+│   └── Counter.java                    — Byte & packet metrics container
+├── identity/
+│   ├── DeviceResolver.java             — Device identity resolution interface
+│   ├── DhcpArpResolver.java            — dnsmasq lease & ARP table parser (uses ProcessExecutor)
+│   └── DeviceInfo.java                 — Client device details
+├── enforce/
+│   ├── Enforcer.java                   — Strategy pattern rate-limiter interface
+│   ├── LinuxEnforcer.java              — Linux tc HTB/TBF & mark enforcer
+│   ├── WindowsEnforcer.java            — Windows PowerShell NetQoS enforcer
+│   ├── StubEnforcer.java               — macOS stub enforcer
+│   ├── PlatformEnforcerFactory.java    — Factory for OS-specific enforcers (OCP)
+│   ├── EnforceRegistry.java            — O(1) active rule tracking & expiry monitor
+│   └── RuleEntry.java                  — Immutable applied rule representation
+├── usage/
+│   ├── BandwidthTracker.java           — Interface for network bandwidth tracking (DIP)
+│   ├── MacOSBandwidthTracker.java      — macOS netstat interface parser
+│   ├── LinuxBandwidthTracker.java      — Linux /proc/net/dev parser
+│   ├── PlatformBandwidthTrackerFactory.java — Factory for OS bandwidth trackers (OCP)
+│   ├── InterfaceStats.java             — Byte counter snapshot
+│   └── Usage.java                      — Duration & total bandwidth metrics
+└── util/
+    ├── ProcessExecutor.java            — Process execution & command logger
+    ├── DurationParser.java             — Duration string parser utility (SRP)
+    └── CidrBlock.java                  — Subnet CIDR matching helper
 ```
 
-### Data Flow
+---
 
-```
-DNS packets (pcap) → Sniffer → Classifier → Account (firewall counters)
-                        ↓            ↓              ↓
-                   Domain Tracker  Identity      Alert (live table + thresholds)
-                        ↓                            ↓
-                   Usage Tracker              Enforce (tc rate-limit)
-```
+## SOLID Principles in Detail
 
-## Configuration
+1. **Single Responsibility Principle (SRP)**
+   - `ConfigLoader` handles parsing and flag merging.
+   - `ProcessExecutor` handles subprocess execution and command logging (`🔒 [FIREWALL] Executing OS Command:`).
+   - `DurationParser` isolates string-to-duration parsing logic (`"5s"`, `"30m"`).
+   - `SqliteDnsCacheRepository` manages SQL queries and database connection lifecycle.
 
-See `config.yaml` for the full configuration with comments. Key settings:
+2. **Open/Closed Principle (OCP)**
+   - `PlatformEnforcerFactory`, `PlatformAccountantFactory`, and `PlatformBandwidthTrackerFactory` dynamically instantiate platform-specific strategies based on host OS without mutating client code.
+   - `DnsSniffer` exposes a `DnsListener` observer interface so new features (e.g. external telemetry logging) can be attached without altering capture logic.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `interface` | `wlan0` | Hotspot network interface |
-| `subnet` | `192.168.4.0/24` | Client subnet in CIDR |
-| `alert_thresholds.bytes_per_interval` | 50 MB | Alert threshold per 5s interval |
-| `safety_rails.min_kbit_floor` | 64 kbit | Minimum throttle rate (never go below) |
-| `safety_rails.auto_expire_duration` | 30 min | Throttles auto-expire after this |
-| `persistence_ttl` | 24h | DNS cache entry TTL |
+3. **Liskov Substitution Principle (LSP)**
+   - `LinuxEnforcer`, `WindowsEnforcer`, and `StubEnforcer` implement `Enforcer`. `EnforceRegistry` accepts any `Enforcer` instance seamlessly without unexpected side-effects.
+   - `MacOSBandwidthTracker` and `LinuxBandwidthTracker` fully satisfy the `BandwidthTracker` contract.
 
-### App Signature Dictionary
+4. **Interface Segregation Principle (ISP)**
+   - `Classifier`, `Sniffer`, `BandwidthTracker`, `DnsCacheRepository`, `TrafficAccountant`, and `DeviceResolver` provide focused, single-purpose interfaces.
 
-The signature dictionary in `config.yaml` maps domain suffixes to application names (29+ apps included). Add your own:
+5. **Dependency Inversion Principle (DIP)**
+   - High-level classes depend on abstract interfaces rather than concrete implementations (e.g., `AlertMonitor` depends on `Sniffer` and `BandwidthTracker` interfaces; `IPClassifier` depends on `DnsCacheRepository`; `DhcpArpResolver` depends on `ProcessExecutor`).
+
+---
+
+## Configuration (`config.yaml`)
 
 ```yaml
-signatures:
-  - domain_suffix: googlevideo.com
-    app_name: YouTube
-  - domain_suffix: fbcdn.net
-    app_name: Facebook-Instagram
-  - domain_suffix: tiktokv.com
-    app_name: TikTok
-  - domain_suffix: netflix.com
-    app_name: Netflix
-  - domain_suffix: spotify.com
-    app_name: Spotify
+interface: wlan0
+subnet: "192.168.2.0/24"
+alert_thresholds:
+  bytes_per_interval: 52428800 # 50 MB
+  packets_per_interval: 5000
+  interval: 5s
+safety_rails:
+  min_kbit_floor: 64
+  auto_expire_duration: 30m
+persistence_ttl: 24h
+db_path: hotspotd.db
+firewall_backend: nftables
 ```
-
-## Known Limitations
-
-> **These are inherent to DNS-based traffic classification and cannot be fully resolved without DPI (Deep Packet Inspection).**
-
-### 1. DNS-over-HTTPS (DoH) Blind Spot
-Clients using DoH bypass our DNS sniffer entirely. We **detect** DoH traffic (TCP:443 to known resolver IPs) and report it in stats, but cannot classify it.
-
-### 2. CDN IP Sharing
-Multiple apps may share CDN IPs (CloudFront, Akamai, Fastly). CDN-resolved IPs are classified with **low confidence** and not enforced unless `--aggressive` mode is enabled.
-
-### 3. Stale DNS Cache
-DNS resolutions are cached for 24h (configurable). If an app's CDN IP changes, we may continue classifying the old IP. The cache is purged on startup.
-
-### 4. Bandwidth Tracking Granularity
-Interface-level bandwidth is tracked via `netstat` counters (total download/upload on the hotspot interface). Per-app bandwidth breakdowns require Linux nftables accounting rules.
-
-## Persistence
-
-DNS classification data is persisted in BoltDB (`hotspotd.db`). On startup, the cache is preloaded. On shutdown (SIGINT/SIGTERM), the cache is flushed to disk.
-
-## Safety Rails
-
-- **Minimum throttle floor**: Never go below 64 kbit/s (configurable)
-- **Auto-expire**: Throttles expire after 30 minutes (configurable)
-- **Low-confidence protection**: Rate-limiting only on high-confidence classifications by default
-- **Graceful shutdown**: All rules removed on exit. Use `--reset` to manually clear.
-
-## License
-
-Internal tool — not licensed for redistribution.
